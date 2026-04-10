@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+import re
 from typing import Any, Dict, Optional
 
 import httpx
@@ -41,6 +42,7 @@ QQ_SUPER_ADMINS = {
     if item.strip()
 }
 QQ_WHITELIST_FILE = Path(os.getenv("QQ_WHITELIST_FILE", "data/whitelist_users.txt"))
+BOT_MAX_REPLY_CHARS = int(os.getenv("BOT_MAX_REPLY_CHARS", "60"))
 
 
 def _load_whitelist_file() -> set[str]:
@@ -130,19 +132,26 @@ def _is_whitelisted_user(event: Dict[str, Any]) -> bool:
     return bool(user_id and user_id in _RUNTIME_WHITELIST)
 
 
+def _finalize_reply_text(text: str) -> str:
+    """统一压缩并限长所有回复文本（含命令回复与模型回复）。"""
+    value = (text or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    if not value:
+        return "收到。"
+    if len(value) <= BOT_MAX_REPLY_CHARS:
+        return value
+    clipped = value[:BOT_MAX_REPLY_CHARS].rstrip("，,。.;；:：!?！？ ")
+    return f"{clipped}。"
+
+
 def _parse_admin_command(text: str) -> tuple[str, str]:
     """解析白名单管理命令，返回 (action, arg)。"""
     raw = text.strip()
-    lowered = raw.lower()
-
-    for prefix in ("wl add ", "/wl add "):
-        if lowered.startswith(prefix):
-            return "add", raw[len(prefix) :].strip()
-    for prefix in ("wl del ", "/wl del "):
-        if lowered.startswith(prefix):
-            return "del", raw[len(prefix) :].strip()
-    if lowered in ("wl list", "/wl list"):
-        return "list", ""
+    m = re.match(r"^/?wl\s+(add|del|list)\s*(.*)$", raw, flags=re.IGNORECASE)
+    if m:
+        action = m.group(1).lower()
+        arg = m.group(2).strip()
+        return action, arg
 
     for prefix in ("添加白名单", "白名单添加"):
         if raw.startswith(prefix):
@@ -238,6 +247,7 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
 
     admin_reply = _handle_admin_command(event, text)
     if admin_reply is not None:
+        admin_reply = _finalize_reply_text(admin_reply)
         if event.get("message_type") == "group":
             group_id = event.get("group_id")
             if not group_id:
@@ -256,6 +266,7 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     session_id = _session_id(event)
     runtime = _get_runtime()
     answer, _ = runtime.reply(session_id=session_id, user_text=text)
+    answer = _finalize_reply_text(answer)
 
     if event.get("message_type") == "group":
         group_id = event.get("group_id")
