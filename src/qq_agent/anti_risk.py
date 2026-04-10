@@ -41,6 +41,7 @@ def sanitize_reply_text(
     max_chars: int,
     fallback: str,
     keep_newlines: bool = False,
+    skip_length_limit: bool = False,
 ) -> str:
     """将文本清洗为简短、稳定的纯文本回复。"""
     value = text or ""
@@ -61,19 +62,28 @@ def sanitize_reply_text(
 
     if not value:
         value = (fallback or "").strip() or "收到。"
+    if skip_length_limit:
+        return value
     if len(value) <= max_chars:
         return value
     clipped = value[:max_chars].rstrip("，,。.;；:：!?！？ ")
     return f"{clipped}。"
 
 
-def sanitize_for_config(text: str, config: AntiRiskConfig, *, keep_newlines: bool = False) -> str:
+def sanitize_for_config(
+    text: str,
+    config: AntiRiskConfig,
+    *,
+    keep_newlines: bool = False,
+    skip_length_limit: bool = False,
+) -> str:
     """按配置清洗回复文本。"""
     return sanitize_reply_text(
         text,
         max_chars=config.max_reply_chars,
         fallback=config.fallback_reply,
         keep_newlines=keep_newlines,
+        skip_length_limit=skip_length_limit,
     )
 
 

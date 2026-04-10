@@ -175,6 +175,13 @@ def _match_subcommand_help_target(text: str) -> str:
     return ""
 
 
+def _is_help_query_text(text: str) -> bool:
+    """判断是否为指令查询类请求（可放宽字数限制）。"""
+    if _is_help_command(text):
+        return True
+    return bool(_match_subcommand_help_target(text))
+
+
 def _root_help_text() -> str:
     """返回一级命令帮助文本。"""
     return "\n".join(
@@ -298,7 +305,12 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
 
     command_reply = _handle_command(event, text)
     if command_reply is not None:
-        command_reply = sanitize_for_config(command_reply, _ANTI_RISK_CONFIG, keep_newlines=True)
+        command_reply = sanitize_for_config(
+            command_reply,
+            _ANTI_RISK_CONFIG,
+            keep_newlines=True,
+            skip_length_limit=_is_help_query_text(text),
+        )
         await random_command_delay(_ANTI_RISK_CONFIG)
         if event.get("message_type") == "group":
             group_id = event.get("group_id")
