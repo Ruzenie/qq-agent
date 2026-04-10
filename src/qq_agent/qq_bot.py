@@ -154,6 +154,35 @@ def _parse_admin_command(text: str) -> tuple[str, str]:
     return "", ""
 
 
+def _is_help_command(text: str) -> bool:
+    """判断是否为一级帮助命令。"""
+    return bool(re.match(r"^/?(help|帮助|菜单)$", text.strip(), flags=re.IGNORECASE))
+
+
+def _is_wl_help_command(text: str) -> bool:
+    """判断是否为 wl 子命令帮助。"""
+    return bool(re.match(r"^/?wl\s+(-h|--help|help|帮助)$", text.strip(), flags=re.IGNORECASE))
+
+
+def _root_help_text() -> str:
+    """返回一级命令帮助文本。"""
+    return "一级指令: help, wl。查看 wl 子命令: wl --help"
+
+
+def _wl_help_text() -> str:
+    """返回 wl 命令帮助文本。"""
+    return "wl 子命令: add <qq>, del <qq>, list。仅超级管理员可用。"
+
+
+def _handle_command(event: Dict[str, Any], text: str) -> Optional[str]:
+    """处理命令管线（优先于白名单与 LLM）。"""
+    if _is_help_command(text):
+        return _root_help_text()
+    if _is_wl_help_command(text):
+        return _wl_help_text()
+    return _handle_admin_command(event, text)
+
+
 def _handle_admin_command(event: Dict[str, Any], text: str) -> Optional[str]:
     """处理超级管理员的白名单命令；非命令返回 None。"""
     action, arg = _parse_admin_command(text)
@@ -234,21 +263,21 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     if not text:
         return {"ok": True, "ignored": "empty-message"}
 
-    admin_reply = _handle_admin_command(event, text)
-    if admin_reply is not None:
-        admin_reply = sanitize_for_config(admin_reply, _ANTI_RISK_CONFIG)
+    command_reply = _handle_command(event, text)
+    if command_reply is not None:
+        command_reply = sanitize_for_config(command_reply, _ANTI_RISK_CONFIG)
         await random_command_delay(_ANTI_RISK_CONFIG)
         if event.get("message_type") == "group":
             group_id = event.get("group_id")
             if not group_id:
                 return {"ok": False, "error": "missing group_id"}
-            await _send_group_msg(int(group_id), admin_reply)
+            await _send_group_msg(int(group_id), command_reply)
         else:
             user_id = event.get("user_id")
             if not user_id:
                 return {"ok": False, "error": "missing user_id"}
-            await _send_private_msg(int(user_id), admin_reply)
-        return {"ok": True, "admin_command": True}
+            await _send_private_msg(int(user_id), command_reply)
+        return {"ok": True, "command": True}
 
     if not _is_whitelisted_user(event):
         return {"ok": True, "ignored": "not-in-whitelist"}
