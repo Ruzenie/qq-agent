@@ -21,6 +21,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from .anti_risk import load_anti_risk_config_from_env, random_command_delay, sanitize_for_config
 from .agent_runtime import AgentRuntime
+from .audit_logger import AuditLogger
 
 load_dotenv()
 
@@ -44,7 +45,26 @@ QQ_SUPER_ADMINS = {
 }
 QQ_WHITELIST_FILE = Path(os.getenv("QQ_WHITELIST_FILE", "data/whitelist_users.txt"))
 _ANTI_RISK_CONFIG = load_anti_risk_config_from_env()
+_AUDIT_LOGGER = AuditLogger()
 _COMMAND_HELP_FLAGS = {"--help", "-h", "help", "帮助"}
+_COMMAND_ALIASES = {
+    "帮助": "help",
+    "菜单": "help",
+}
+_COMMAND_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "help": {
+        "summary": "查询所有指令",
+        "subcommands": {},
+    },
+    "wl": {
+        "summary": "白名单类指令",
+        "subcommands": {
+            "add": "添加白名单",
+            "del": "删除白名单",
+            "list": "查看白名单",
+        },
+    },
+}
 
 
 def _load_whitelist_file() -> set[str]:
@@ -155,71 +175,61 @@ def _parse_admin_command(text: str) -> tuple[str, str]:
     return "", ""
 
 
-def _is_help_command(text: str) -> bool:
-    """判断是否为一级帮助命令。"""
-    return bool(re.match(r"^/?(help|帮助|菜单)$", text.strip(), flags=re.IGNORECASE))
-
-
-def _match_subcommand_help_target(text: str) -> str:
-    """识别 `<一级指令> --help|-h|help|帮助` 形式，返回一级指令名。"""
+def _parse_root_command(text: str) -> tuple[str, list[str]]:
+    """解析命令文本，返回 (一级指令, 参数列表)。"""
     raw = text.strip()
     if raw.startswith("/"):
         raw = raw[1:].strip()
+    if not raw:
+        return "", []
     tokens = raw.split()
-    if len(tokens) < 2:
-        return ""
-    root_cmd = tokens[0].lower()
-    sub_help = tokens[1].lower()
-    if sub_help in _COMMAND_HELP_FLAGS:
-        return root_cmd
-    return ""
+    root_raw = tokens[0]
+    root_cmd = _COMMAND_ALIASES.get(root_raw, root_raw.lower())
+    if root_cmd not in _COMMAND_REGISTRY:
+        return "", []
+    return root_cmd, tokens[1:]
 
 
 def _is_help_query_text(text: str) -> bool:
     """判断是否为指令查询类请求（可放宽字数限制）。"""
-    if _is_help_command(text):
+    root_cmd, args = _parse_root_command(text)
+    if root_cmd == "help" and not args:
         return True
-    return bool(_match_subcommand_help_target(text))
+    return bool(args and args[0].lower() in _COMMAND_HELP_FLAGS)
 
 
 def _root_help_text() -> str:
     """返回一级命令帮助文本。"""
-    return "\n".join(
-        [
-            "指令帮助:",
-            "help 查询所有指令",
-            "wl 白名单类指令",
-            "可使用 --help、-h、help 或“帮助”查看详细子命令。",
-        ]
-    )
+    lines = ["指令帮助:"]
+    for root_cmd, meta in _COMMAND_REGISTRY.items():
+        lines.append(f"{root_cmd} {meta['summary']}")
+    lines.append("可使用 --help、-h、help 或“帮助”查看详细子命令。")
+    return "\n".join(lines)
 
 
-def _wl_help_text() -> str:
-    """返回 wl 命令帮助文本。"""
-    return "\n".join(
-        [
-            "wl 子命令:",
-            "add 添加白名单",
-            "del 删除白名单",
-            "list 查看白名单",
-        ]
-    )
-
-
-def _help_help_text() -> str:
-    """返回 help 命令的子命令帮助文本。"""
-    return "help 无子命令。"
+def _command_help_text(root_cmd: str) -> str:
+    """返回指定一级命令的子命令帮助文本。"""
+    subcommands: Dict[str, str] = _COMMAND_REGISTRY[root_cmd]["subcommands"]
+    if not subcommands:
+        return f"{root_cmd} 无子命令。"
+    lines = [f"{root_cmd} 子命令:"]
+    for sub_cmd, desc in subcommands.items():
+        lines.append(f"{sub_cmd} {desc}")
+    return "\n".join(lines)
 
 
 def _handle_command(event: Dict[str, Any], text: str) -> Optional[str]:
     """处理命令管线（优先于白名单与 LLM）。"""
-    if _is_help_command(text):
+    root_cmd, args = _parse_root_command(text)
+    if not root_cmd:
+        return _handle_admin_command(event, text)
+
+    if root_cmd == "help" and not args:
         return _root_help_text()
-    sub_help_target = _match_subcommand_help_target(text)
-    if sub_help_target == "wl":
-        return _wl_help_text()
-    if sub_help_target == "help":
-        return _help_help_text()
+
+    if args and args[0].lower() in _COMMAND_HELP_FLAGS:
+        return _command_help_text(root_cmd)
+
     return _handle_admin_command(event, text)
 
 
@@ -293,15 +303,34 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     body = await request.body()
     _verify_signature(body, x_signature)
     event = await request.json()
+    msg_type = str(event.get("message_type", ""))
+    user_id = str(event.get("user_id", ""))
+    group_id = str(event.get("group_id", ""))
 
     if event.get("post_type") != "message":
+        _AUDIT_LOGGER.log(
+            "event_ignored",
+            {"reason": "non-message", "post_type": str(event.get("post_type", ""))},
+        )
         return {"ok": True, "ignored": "non-message"}
     if _is_self_message(event):
+        _AUDIT_LOGGER.log("event_ignored", {"reason": "self-message", "message_type": msg_type, "user_id": user_id})
         return {"ok": True, "ignored": "self-message"}
 
     text = _extract_text(event)
     if not text:
+        _AUDIT_LOGGER.log("event_ignored", {"reason": "empty-message", "message_type": msg_type, "user_id": user_id})
         return {"ok": True, "ignored": "empty-message"}
+
+    _AUDIT_LOGGER.log(
+        "message_received",
+        {
+            "message_type": msg_type,
+            "user_id": user_id,
+            "group_id": group_id,
+            "text": text,
+        },
+    )
 
     command_reply = _handle_command(event, text)
     if command_reply is not None:
@@ -315,16 +344,32 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
         if event.get("message_type") == "group":
             group_id = event.get("group_id")
             if not group_id:
+                _AUDIT_LOGGER.log("message_failed", {"pipeline": "command", "error": "missing group_id", "user_id": user_id})
                 return {"ok": False, "error": "missing group_id"}
             await _send_group_msg(int(group_id), command_reply)
         else:
             user_id = event.get("user_id")
             if not user_id:
+                _AUDIT_LOGGER.log("message_failed", {"pipeline": "command", "error": "missing user_id"})
                 return {"ok": False, "error": "missing user_id"}
             await _send_private_msg(int(user_id), command_reply)
+        _AUDIT_LOGGER.log(
+            "message_sent",
+            {
+                "pipeline": "command",
+                "message_type": msg_type,
+                "user_id": user_id,
+                "group_id": group_id,
+                "reply": command_reply,
+            },
+        )
         return {"ok": True, "command": True}
 
     if not _is_whitelisted_user(event):
+        _AUDIT_LOGGER.log(
+            "event_ignored",
+            {"reason": "not-in-whitelist", "message_type": msg_type, "user_id": user_id},
+        )
         return {"ok": True, "ignored": "not-in-whitelist"}
 
     session_id = _session_id(event)
@@ -335,13 +380,26 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     if event.get("message_type") == "group":
         group_id = event.get("group_id")
         if not group_id:
+            _AUDIT_LOGGER.log("message_failed", {"pipeline": "llm", "error": "missing group_id", "session_id": session_id})
             return {"ok": False, "error": "missing group_id"}
         await _send_group_msg(int(group_id), answer)
     else:
         user_id = event.get("user_id")
         if not user_id:
+            _AUDIT_LOGGER.log("message_failed", {"pipeline": "llm", "error": "missing user_id", "session_id": session_id})
             return {"ok": False, "error": "missing user_id"}
         await _send_private_msg(int(user_id), answer)
+    _AUDIT_LOGGER.log(
+        "message_sent",
+        {
+            "pipeline": "llm",
+            "session_id": session_id,
+            "message_type": msg_type,
+            "user_id": user_id,
+            "group_id": group_id,
+            "reply": answer,
+        },
+    )
 
     return {"ok": True, "session_id": session_id}
 

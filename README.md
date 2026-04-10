@@ -11,6 +11,16 @@ uv sync
 uv run uvicorn qq_agent.qq_bot:app --host 0.0.0.0 --port 8000
 ```
 
+## 导入问题排查（hello_agents）
+
+如果编辑器提示 `无法解析导入 "hello_agents"`：
+
+1. 确认 IDE Python 解释器选择为 `qq-agent/.venv/bin/python`
+2. 在项目根目录执行一次 `uv sync`
+3. 重启语言服务（Pylance/Pyright）
+
+项目已提供 `pyrightconfig.json`，并显式绑定 `.venv` 与 `src` 路径。
+
 ## 环境变量（.env）
 
 ```env
@@ -35,6 +45,14 @@ BOT_MAX_REPLY_CHARS=50
 BOT_FALLBACK_REPLY=收到，稍后回复你。
 BOT_CMD_DELAY_MIN=0.5
 BOT_CMD_DELAY_MAX=1.5
+
+# Layered memory
+QQ_MEMORY_FILE=data/memory/sessions.json
+QQ_MEMORY_MAX_TURNS=8
+
+# Audit log
+QQ_AUDIT_LOG_ENABLED=1
+QQ_AUDIT_LOG_FILE=data/logs/audit.jsonl
 ```
 
 ## 回调地址
@@ -57,3 +75,12 @@ BOT_CMD_DELAY_MAX=1.5
 - `添加白名单123456789`
 - `删除白名单123456789`
 - `白名单列表`
+
+## 分层记忆与审计日志
+
+- 分层记忆：
+  - 短期记忆：进程内会话上下文；
+  - 长期记忆：`QQ_MEMORY_FILE` 持久化最近若干轮（`QQ_MEMORY_MAX_TURNS`）。
+- 审计日志：
+  - 记录收消息、命令/LLM 路由、回包、忽略原因、失败原因；
+  - 默认输出到 `QQ_AUDIT_LOG_FILE`（JSONL 格式）。

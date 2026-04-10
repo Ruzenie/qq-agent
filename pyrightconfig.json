@@ -1,0 +1,22 @@
+{
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "napcat-data",
+    "tool-output"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": "src",
+      "extraPaths": [
+        "src"
+      ]
+    }
+  ],
+  "reportMissingImports": true
+}
