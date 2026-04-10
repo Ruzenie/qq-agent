@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
 from pathlib import Path
+import random
 import re
 from typing import Any, Dict, Optional
 
@@ -43,6 +45,8 @@ QQ_SUPER_ADMINS = {
 }
 QQ_WHITELIST_FILE = Path(os.getenv("QQ_WHITELIST_FILE", "data/whitelist_users.txt"))
 BOT_MAX_REPLY_CHARS = int(os.getenv("BOT_MAX_REPLY_CHARS", "60"))
+BOT_CMD_DELAY_MIN = float(os.getenv("BOT_CMD_DELAY_MIN", "0.5"))
+BOT_CMD_DELAY_MAX = float(os.getenv("BOT_CMD_DELAY_MAX", "1.5"))
 
 
 def _load_whitelist_file() -> set[str]:
@@ -142,6 +146,13 @@ def _finalize_reply_text(text: str) -> str:
         return value
     clipped = value[:BOT_MAX_REPLY_CHARS].rstrip("，,。.;；:：!?！？ ")
     return f"{clipped}。"
+
+
+async def _sleep_command_delay() -> None:
+    """为命令回复增加随机延迟，降低固定响应节奏带来的风控风险。"""
+    low = min(BOT_CMD_DELAY_MIN, BOT_CMD_DELAY_MAX)
+    high = max(BOT_CMD_DELAY_MIN, BOT_CMD_DELAY_MAX)
+    await asyncio.sleep(random.uniform(low, high))
 
 
 def _parse_admin_command(text: str) -> tuple[str, str]:
@@ -248,6 +259,7 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     admin_reply = _handle_admin_command(event, text)
     if admin_reply is not None:
         admin_reply = _finalize_reply_text(admin_reply)
+        await _sleep_command_delay()
         if event.get("message_type") == "group":
             group_id = event.get("group_id")
             if not group_id:
