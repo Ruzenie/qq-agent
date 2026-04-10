@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-import os
-import re
 from typing import Dict, List, Tuple
 
+from .anti_risk import load_anti_risk_config_from_env, sanitize_for_config
 from .llm_client import HelloAgentsLLM
 
 
@@ -27,8 +26,7 @@ class AgentRuntime:
         self._llm = HelloAgentsLLM()
         self._sessions: Dict[str, List[Dict[str, str]]] = {}
         self._max_turns = max_turns
-        self._max_reply_chars = int(os.getenv("BOT_MAX_REPLY_CHARS", "60"))
-        self._fallback_reply = os.getenv("BOT_FALLBACK_REPLY", "收到，稍后回复你。")
+        self._anti_risk = load_anti_risk_config_from_env()
 
     def _bootstrap(self) -> List[Dict[str, str]]:
         """为新会话构造初始系统提示词。"""
@@ -49,20 +47,7 @@ class AgentRuntime:
 
     def _normalize_answer(self, answer: str) -> str:
         """将模型回复裁剪为简短纯文本，降低风控风险。"""
-        text = answer or ""
-        text = text.replace("```", " ")
-        text = re.sub(r"`([^`]*)`", r"\1", text)
-        text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
-        text = re.sub(r"^\s*[-*#>]+\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"\s+", " ", text.replace("\n", " ")).strip()
-
-        if not text:
-            return self._fallback_reply
-
-        if len(text) > self._max_reply_chars:
-            text = text[: self._max_reply_chars].rstrip("，,。.;；:：!?！？ ")
-            text = f"{text}。"
-        return text
+        return sanitize_for_config(answer, self._anti_risk)
 
     def _trim(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """裁剪历史，仅保留系统提示与最近若干轮对话。"""
@@ -85,7 +70,7 @@ class AgentRuntime:
         try:
             answer = self._llm.think(messages)
         except Exception:
-            answer = self._fallback_reply
+            answer = self._anti_risk.fallback_reply
         answer = self._normalize_answer(answer)
 
         messages.append({"role": "assistant", "content": answer})

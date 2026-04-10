@@ -8,12 +8,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import os
 from pathlib import Path
-import random
 import re
 from typing import Any, Dict, Optional
 
@@ -21,6 +19,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
+from .anti_risk import load_anti_risk_config_from_env, random_command_delay, sanitize_for_config
 from .agent_runtime import AgentRuntime
 
 load_dotenv()
@@ -44,9 +43,7 @@ QQ_SUPER_ADMINS = {
     if item.strip()
 }
 QQ_WHITELIST_FILE = Path(os.getenv("QQ_WHITELIST_FILE", "data/whitelist_users.txt"))
-BOT_MAX_REPLY_CHARS = int(os.getenv("BOT_MAX_REPLY_CHARS", "60"))
-BOT_CMD_DELAY_MIN = float(os.getenv("BOT_CMD_DELAY_MIN", "0.5"))
-BOT_CMD_DELAY_MAX = float(os.getenv("BOT_CMD_DELAY_MAX", "1.5"))
+_ANTI_RISK_CONFIG = load_anti_risk_config_from_env()
 
 
 def _load_whitelist_file() -> set[str]:
@@ -134,25 +131,6 @@ def _is_whitelisted_user(event: Dict[str, Any]) -> bool:
         return True
     user_id = str(event.get("user_id", ""))
     return bool(user_id and user_id in _RUNTIME_WHITELIST)
-
-
-def _finalize_reply_text(text: str) -> str:
-    """统一压缩并限长所有回复文本（含命令回复与模型回复）。"""
-    value = (text or "").strip()
-    value = re.sub(r"\s+", " ", value)
-    if not value:
-        return "收到。"
-    if len(value) <= BOT_MAX_REPLY_CHARS:
-        return value
-    clipped = value[:BOT_MAX_REPLY_CHARS].rstrip("，,。.;；:：!?！？ ")
-    return f"{clipped}。"
-
-
-async def _sleep_command_delay() -> None:
-    """为命令回复增加随机延迟，降低固定响应节奏带来的风控风险。"""
-    low = min(BOT_CMD_DELAY_MIN, BOT_CMD_DELAY_MAX)
-    high = max(BOT_CMD_DELAY_MIN, BOT_CMD_DELAY_MAX)
-    await asyncio.sleep(random.uniform(low, high))
 
 
 def _parse_admin_command(text: str) -> tuple[str, str]:
@@ -258,8 +236,8 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
 
     admin_reply = _handle_admin_command(event, text)
     if admin_reply is not None:
-        admin_reply = _finalize_reply_text(admin_reply)
-        await _sleep_command_delay()
+        admin_reply = sanitize_for_config(admin_reply, _ANTI_RISK_CONFIG)
+        await random_command_delay(_ANTI_RISK_CONFIG)
         if event.get("message_type") == "group":
             group_id = event.get("group_id")
             if not group_id:
@@ -278,7 +256,7 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     session_id = _session_id(event)
     runtime = _get_runtime()
     answer, _ = runtime.reply(session_id=session_id, user_text=text)
-    answer = _finalize_reply_text(answer)
+    answer = sanitize_for_config(answer, _ANTI_RISK_CONFIG)
 
     if event.get("message_type") == "group":
         group_id = event.get("group_id")
