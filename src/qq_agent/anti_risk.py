@@ -35,14 +35,29 @@ def load_anti_risk_config_from_env() -> AntiRiskConfig:
     )
 
 
-def sanitize_reply_text(text: str, *, max_chars: int, fallback: str) -> str:
+def sanitize_reply_text(
+    text: str,
+    *,
+    max_chars: int,
+    fallback: str,
+    keep_newlines: bool = False,
+) -> str:
     """将文本清洗为简短、稳定的纯文本回复。"""
     value = text or ""
     value = value.replace("```", " ")
     value = re.sub(r"`([^`]*)`", r"\1", value)
     value = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", value)
     value = re.sub(r"^\s*[-*#>]+\s*", "", value, flags=re.MULTILINE)
-    value = re.sub(r"\s+", " ", value.replace("\n", " ")).strip()
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    if keep_newlines:
+        lines = []
+        for line in value.split("\n"):
+            line = re.sub(r"\s+", " ", line).strip()
+            if line:
+                lines.append(line)
+        value = "\n".join(lines).strip()
+    else:
+        value = re.sub(r"\s+", " ", value.replace("\n", " ")).strip()
 
     if not value:
         value = (fallback or "").strip() or "收到。"
@@ -52,12 +67,13 @@ def sanitize_reply_text(text: str, *, max_chars: int, fallback: str) -> str:
     return f"{clipped}。"
 
 
-def sanitize_for_config(text: str, config: AntiRiskConfig) -> str:
+def sanitize_for_config(text: str, config: AntiRiskConfig, *, keep_newlines: bool = False) -> str:
     """按配置清洗回复文本。"""
     return sanitize_reply_text(
         text,
         max_chars=config.max_reply_chars,
         fallback=config.fallback_reply,
+        keep_newlines=keep_newlines,
     )
 
 

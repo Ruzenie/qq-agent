@@ -44,6 +44,7 @@ QQ_SUPER_ADMINS = {
 }
 QQ_WHITELIST_FILE = Path(os.getenv("QQ_WHITELIST_FILE", "data/whitelist_users.txt"))
 _ANTI_RISK_CONFIG = load_anti_risk_config_from_env()
+_COMMAND_HELP_FLAGS = {"--help", "-h", "help", "帮助"}
 
 
 def _load_whitelist_file() -> set[str]:
@@ -159,27 +160,59 @@ def _is_help_command(text: str) -> bool:
     return bool(re.match(r"^/?(help|帮助|菜单)$", text.strip(), flags=re.IGNORECASE))
 
 
-def _is_wl_help_command(text: str) -> bool:
-    """判断是否为 wl 子命令帮助。"""
-    return bool(re.match(r"^/?wl\s+(-h|--help|help|帮助)$", text.strip(), flags=re.IGNORECASE))
+def _match_subcommand_help_target(text: str) -> str:
+    """识别 `<一级指令> --help|-h|help|帮助` 形式，返回一级指令名。"""
+    raw = text.strip()
+    if raw.startswith("/"):
+        raw = raw[1:].strip()
+    tokens = raw.split()
+    if len(tokens) < 2:
+        return ""
+    root_cmd = tokens[0].lower()
+    sub_help = tokens[1].lower()
+    if sub_help in _COMMAND_HELP_FLAGS:
+        return root_cmd
+    return ""
 
 
 def _root_help_text() -> str:
     """返回一级命令帮助文本。"""
-    return "一级指令: help, wl。查看 wl 子命令: wl --help"
+    return "\n".join(
+        [
+            "指令帮助:",
+            "help 查询所有指令",
+            "wl 白名单类指令",
+            "可使用 --help、-h、help 或“帮助”查看详细子命令。",
+        ]
+    )
 
 
 def _wl_help_text() -> str:
     """返回 wl 命令帮助文本。"""
-    return "wl 子命令: add <qq>, del <qq>, list。仅超级管理员可用。"
+    return "\n".join(
+        [
+            "wl 子命令:",
+            "add 添加白名单",
+            "del 删除白名单",
+            "list 查看白名单",
+        ]
+    )
+
+
+def _help_help_text() -> str:
+    """返回 help 命令的子命令帮助文本。"""
+    return "help 无子命令。"
 
 
 def _handle_command(event: Dict[str, Any], text: str) -> Optional[str]:
     """处理命令管线（优先于白名单与 LLM）。"""
     if _is_help_command(text):
         return _root_help_text()
-    if _is_wl_help_command(text):
+    sub_help_target = _match_subcommand_help_target(text)
+    if sub_help_target == "wl":
         return _wl_help_text()
+    if sub_help_target == "help":
+        return _help_help_text()
     return _handle_admin_command(event, text)
 
 
@@ -265,7 +298,7 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
 
     command_reply = _handle_command(event, text)
     if command_reply is not None:
-        command_reply = sanitize_for_config(command_reply, _ANTI_RISK_CONFIG)
+        command_reply = sanitize_for_config(command_reply, _ANTI_RISK_CONFIG, keep_newlines=True)
         await random_command_delay(_ANTI_RISK_CONFIG)
         if event.get("message_type") == "group":
             group_id = event.get("group_id")
