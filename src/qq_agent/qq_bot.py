@@ -73,6 +73,14 @@ _COMMAND_REGISTRY: Dict[str, Dict[str, Any]] = {
         "summary": "查询所有指令",
         "subcommands": {},
     },
+    "chat": {
+        "summary": "当前会话 LLM 开关",
+        "subcommands": {
+            "on": "开启当前会话 LLM 对话",
+            "off": "关闭当前会话 LLM 对话",
+            "status": "查看当前会话状态",
+        },
+    },
     "wl": {
         "summary": "白名单类指令",
         "subcommands": {
@@ -143,6 +151,7 @@ def _save_monitor_group_file(groups: set[str]) -> None:
 
 _RUNTIME_WHITELIST = set(QQ_USER_WHITELIST) | _load_whitelist_file()
 _RUNTIME_MONITOR_GROUPS = set(QQ_MONITOR_GROUP_IDS) | _load_monitor_group_file()
+_SESSION_CHAT_ENABLED: Dict[str, bool] = {}
 
 
 def _verify_signature(body: bytes, x_signature: Optional[str]) -> None:
@@ -348,7 +357,7 @@ def _is_help_query_text(text: str) -> bool:
     root_cmd, args = _parse_root_command(text)
     if root_cmd == "help" and not args:
         return True
-    if root_cmd == "recall":
+    if root_cmd in {"recall", "chat"}:
         return True
     return bool(args and args[0].lower() in _COMMAND_HELP_FLAGS)
 
@@ -385,10 +394,32 @@ def _handle_command(event: Dict[str, Any], text: str) -> Optional[str]:
     if args and args[0].lower() in _COMMAND_HELP_FLAGS:
         return _command_help_text(root_cmd)
 
+    if root_cmd == "chat":
+        return _handle_chat_command(event, args)
+
     if root_cmd == "recall":
         return _handle_recall_command(event, args)
 
     return _handle_admin_command(event, text)
+
+
+def _handle_chat_command(event: Dict[str, Any], args: list[str]) -> str:
+    """处理当前会话 chat on/off/status 指令。"""
+    session_id = _session_id(event)
+    current = _SESSION_CHAT_ENABLED.get(session_id, False)
+    if not args:
+        return f"当前会话 LLM 状态：{'on' if current else 'off'}。用法：chat on|off|status"
+
+    action = args[0].strip().lower()
+    if action in {"status", "state"}:
+        return f"当前会话 LLM 状态：{'on' if current else 'off'}。"
+    if action in {"on", "start", "open", "开启"}:
+        _SESSION_CHAT_ENABLED[session_id] = True
+        return "已开启当前会话 LLM 对话。"
+    if action in {"off", "stop", "close", "关闭"}:
+        _SESSION_CHAT_ENABLED[session_id] = False
+        return "已关闭当前会话 LLM 对话。"
+    return "用法：chat on|off|status"
 
 
 def _handle_recall_command(event: Dict[str, Any], args: list[str]) -> str:
@@ -679,6 +710,13 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
         return {"ok": True, "ignored": "not-in-whitelist"}
 
     session_id = _session_id(event)
+    if not _SESSION_CHAT_ENABLED.get(session_id, False):
+        _AUDIT_LOGGER.log(
+            "event_ignored",
+            {"reason": "chat-off", "message_type": msg_type, "session_id": session_id},
+        )
+        return {"ok": True, "ignored": "chat-off"}
+
     runtime = _get_runtime()
     answer, _ = runtime.reply(session_id=session_id, user_text=text)
     answer = sanitize_for_config(answer, _ANTI_RISK_CONFIG)

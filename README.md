@@ -77,6 +77,9 @@ QQ_AUDIT_LOG_FILE=data/logs/audit.jsonl
 
 - `help`（查询所有一级指令）
 - `<一级指令> --help/-h/help/帮助`（查询该一级指令全部子命令）
+- `chat on`（开启当前会话 LLM 对话）
+- `chat off`（关闭当前会话 LLM 对话）
+- `chat status`（查看当前会话 LLM 状态）
 - `wl add 123456789`（添加白名单）
 - `wl del 123456789`（移除白名单）
 - `wl list`（查看白名单）
@@ -94,6 +97,9 @@ QQ_AUDIT_LOG_FILE=data/logs/audit.jsonl
 - `白名单列表`
 
 说明：
+- LLM 对话默认关闭，需在当前会话先执行 `chat on` 才会进入 LLM 链路；
+- `chat on/off` 仅对当前会话生效（群会话按群维度、私聊按用户维度）；
+- 会话开关状态仅保存在进程内，服务重启后会恢复为默认 `off`；
 - 仅 `QQ_MONITOR_GROUP_IDS` 配置的群会被监听并记录；
 - 监听群会写入 `QQ_MONITOR_GROUP_FILE`，重启后保留；
 - 撤回记录查询仅超级管理员可用；
