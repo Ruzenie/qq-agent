@@ -26,9 +26,26 @@ ONEBOT_API_BASE=http://127.0.0.1:3000
 ONEBOT_ACCESS_TOKEN=your-onebot-token
 ONEBOT_EVENT_SECRET=your-onebot-secret
 QQ_BOT_SELF_ID=123456789
+QQ_USER_WHITELIST=123456789,987654321
+QQ_SUPER_ADMINS=123456789
+QQ_WHITELIST_FILE=data/whitelist_users.txt
 ```
 
 ## 回调地址
 
 - Event webhook: `http://<host>:8000/onebot/v11/event`
 - Health check: `http://<host>:8000/healthz`
+
+## 白名单管理命令（仅超级管理员）
+
+可用命令：
+
+- `wl add 123456789`（添加白名单）
+- `wl del 123456789`（移除白名单）
+- `wl list`（查看白名单）
+
+中文别名：
+
+- `添加白名单123456789`
+- `删除白名单123456789`
+- `白名单列表`

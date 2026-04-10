@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import httpx
@@ -29,6 +30,41 @@ ONEBOT_API_BASE = os.getenv("ONEBOT_API_BASE", "http://127.0.0.1:3000")
 ONEBOT_ACCESS_TOKEN = os.getenv("ONEBOT_ACCESS_TOKEN", "")
 ONEBOT_EVENT_SECRET = os.getenv("ONEBOT_EVENT_SECRET", "")
 QQ_BOT_SELF_ID = os.getenv("QQ_BOT_SELF_ID", "")
+QQ_USER_WHITELIST = {
+    item.strip()
+    for item in os.getenv("QQ_USER_WHITELIST", "").replace(";", ",").split(",")
+    if item.strip()
+}
+QQ_SUPER_ADMINS = {
+    item.strip()
+    for item in os.getenv("QQ_SUPER_ADMINS", "").replace(";", ",").split(",")
+    if item.strip()
+}
+QQ_WHITELIST_FILE = Path(os.getenv("QQ_WHITELIST_FILE", "data/whitelist_users.txt"))
+
+
+def _load_whitelist_file() -> set[str]:
+    """从白名单文件加载账号。"""
+    if not QQ_WHITELIST_FILE.exists():
+        return set()
+    users: set[str] = set()
+    for line in QQ_WHITELIST_FILE.read_text(encoding="utf-8").splitlines():
+        uid = line.strip()
+        if uid and not uid.startswith("#"):
+            users.add(uid)
+    return users
+
+
+def _save_whitelist_file(users: set[str]) -> None:
+    """将白名单写回文件，保证重启后仍生效。"""
+    QQ_WHITELIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(sorted(users))
+    if content:
+        content += "\n"
+    QQ_WHITELIST_FILE.write_text(content, encoding="utf-8")
+
+
+_RUNTIME_WHITELIST = set(QQ_USER_WHITELIST) | _load_whitelist_file()
 
 
 def _verify_signature(body: bytes, x_signature: Optional[str]) -> None:
@@ -71,6 +107,87 @@ def _is_self_message(event: Dict[str, Any]) -> bool:
     if QQ_BOT_SELF_ID and user_id == QQ_BOT_SELF_ID:
         return True
     return bool(user_id and self_id and user_id == self_id)
+
+
+def _is_super_admin(event: Dict[str, Any]) -> bool:
+    """判断是否为超级管理员账号。"""
+    if not QQ_SUPER_ADMINS:
+        return False
+    user_id = str(event.get("user_id", ""))
+    return bool(user_id and user_id in QQ_SUPER_ADMINS)
+
+
+def _is_whitelisted_user(event: Dict[str, Any]) -> bool:
+    """判断发送者是否在账号白名单中。
+
+    当 `QQ_USER_WHITELIST` 为空时，视为不启用白名单限制。
+    """
+    if _is_super_admin(event):
+        return True
+    if not _RUNTIME_WHITELIST:
+        return True
+    user_id = str(event.get("user_id", ""))
+    return bool(user_id and user_id in _RUNTIME_WHITELIST)
+
+
+def _parse_admin_command(text: str) -> tuple[str, str]:
+    """解析白名单管理命令，返回 (action, arg)。"""
+    raw = text.strip()
+    lowered = raw.lower()
+
+    for prefix in ("wl add ", "/wl add "):
+        if lowered.startswith(prefix):
+            return "add", raw[len(prefix) :].strip()
+    for prefix in ("wl del ", "/wl del "):
+        if lowered.startswith(prefix):
+            return "del", raw[len(prefix) :].strip()
+    if lowered in ("wl list", "/wl list"):
+        return "list", ""
+
+    for prefix in ("添加白名单", "白名单添加"):
+        if raw.startswith(prefix):
+            return "add", raw[len(prefix) :].strip()
+    for prefix in ("删除白名单", "移除白名单", "白名单删除"):
+        if raw.startswith(prefix):
+            return "del", raw[len(prefix) :].strip()
+    if raw in ("白名单列表", "查看白名单"):
+        return "list", ""
+
+    return "", ""
+
+
+def _handle_admin_command(event: Dict[str, Any], text: str) -> Optional[str]:
+    """处理超级管理员的白名单命令；非命令返回 None。"""
+    action, arg = _parse_admin_command(text)
+    if not action:
+        return None
+    if not _is_super_admin(event):
+        return "无权限：仅超级管理员可管理白名单。"
+
+    if action == "list":
+        if not _RUNTIME_WHITELIST:
+            return "白名单为空。"
+        return f"白名单账号：{'、'.join(sorted(_RUNTIME_WHITELIST))}"
+
+    uid = "".join(ch for ch in arg if ch.isdigit())
+    if not uid:
+        return "参数错误：请提供有效QQ号。"
+
+    if action == "add":
+        if uid in _RUNTIME_WHITELIST:
+            return f"账号 {uid} 已在白名单中。"
+        _RUNTIME_WHITELIST.add(uid)
+        _save_whitelist_file(_RUNTIME_WHITELIST)
+        return f"已添加白名单账号：{uid}"
+
+    if action == "del":
+        if uid not in _RUNTIME_WHITELIST:
+            return f"账号 {uid} 不在白名单中。"
+        _RUNTIME_WHITELIST.remove(uid)
+        _save_whitelist_file(_RUNTIME_WHITELIST)
+        return f"已移除白名单账号：{uid}"
+
+    return "未知命令。"
 
 
 async def _send_group_msg(group_id: int, text: str) -> None:
@@ -118,6 +235,23 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     text = _extract_text(event)
     if not text:
         return {"ok": True, "ignored": "empty-message"}
+
+    admin_reply = _handle_admin_command(event, text)
+    if admin_reply is not None:
+        if event.get("message_type") == "group":
+            group_id = event.get("group_id")
+            if not group_id:
+                return {"ok": False, "error": "missing group_id"}
+            await _send_group_msg(int(group_id), admin_reply)
+        else:
+            user_id = event.get("user_id")
+            if not user_id:
+                return {"ok": False, "error": "missing user_id"}
+            await _send_private_msg(int(user_id), admin_reply)
+        return {"ok": True, "admin_command": True}
+
+    if not _is_whitelisted_user(event):
+        return {"ok": True, "ignored": "not-in-whitelist"}
 
     session_id = _session_id(event)
     runtime = _get_runtime()
