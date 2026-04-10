@@ -22,6 +22,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from .anti_risk import load_anti_risk_config_from_env, random_command_delay, sanitize_for_config
 from .agent_runtime import AgentRuntime
 from .audit_logger import AuditLogger
+from .recall_store import GroupRecallStore, load_recall_store_config_from_env
 
 load_dotenv()
 
@@ -43,13 +44,29 @@ QQ_SUPER_ADMINS = {
     for item in os.getenv("QQ_SUPER_ADMINS", "").replace(";", ",").split(",")
     if item.strip()
 }
+QQ_MONITOR_GROUP_IDS = {
+    item.strip()
+    for item in os.getenv("QQ_MONITOR_GROUP_IDS", "").replace(";", ",").split(",")
+    if item.strip()
+}
+QQ_RECALL_NOTIFY_SUPERADMINS = os.getenv("QQ_RECALL_NOTIFY_SUPERADMINS", "1").strip().lower() not in {
+    "0",
+    "false",
+    "off",
+    "no",
+}
+QQ_RECALL_NOTIFY_MODE = os.getenv("QQ_RECALL_NOTIFY_MODE", "forward").strip().lower()
 QQ_WHITELIST_FILE = Path(os.getenv("QQ_WHITELIST_FILE", "data/whitelist_users.txt"))
+QQ_MONITOR_GROUP_FILE = Path(os.getenv("QQ_MONITOR_GROUP_FILE", "data/monitor_groups.txt"))
 _ANTI_RISK_CONFIG = load_anti_risk_config_from_env()
 _AUDIT_LOGGER = AuditLogger()
+_RECALL_STORE = GroupRecallStore(load_recall_store_config_from_env())
 _COMMAND_HELP_FLAGS = {"--help", "-h", "help", "帮助"}
 _COMMAND_ALIASES = {
     "帮助": "help",
     "菜单": "help",
+    "撤回": "recall",
+    "防撤回": "recall",
 }
 _COMMAND_REGISTRY: Dict[str, Dict[str, Any]] = {
     "help": {
@@ -62,6 +79,21 @@ _COMMAND_REGISTRY: Dict[str, Dict[str, Any]] = {
             "add": "添加白名单",
             "del": "删除白名单",
             "list": "查看白名单",
+        },
+    },
+    "mg": {
+        "summary": "监听群管理指令",
+        "subcommands": {
+            "add": "添加监听群",
+            "del": "删除监听群",
+            "list": "查看监听群",
+        },
+    },
+    "recall": {
+        "summary": "撤回留痕查询",
+        "subcommands": {
+            "list [N]": "查看本群最近 N 条撤回记录（默认10，最大20）",
+            "cleanup": "立即清理过期留痕记录",
         },
     },
 }
@@ -88,7 +120,29 @@ def _save_whitelist_file(users: set[str]) -> None:
     QQ_WHITELIST_FILE.write_text(content, encoding="utf-8")
 
 
+def _load_monitor_group_file() -> set[str]:
+    """从监听群文件加载群号。"""
+    if not QQ_MONITOR_GROUP_FILE.exists():
+        return set()
+    groups: set[str] = set()
+    for line in QQ_MONITOR_GROUP_FILE.read_text(encoding="utf-8").splitlines():
+        gid = "".join(ch for ch in line.strip() if ch.isdigit())
+        if gid:
+            groups.add(gid)
+    return groups
+
+
+def _save_monitor_group_file(groups: set[str]) -> None:
+    """将监听群列表写回文件，保证重启后仍生效。"""
+    QQ_MONITOR_GROUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    content = "\n".join(sorted(groups))
+    if content:
+        content += "\n"
+    QQ_MONITOR_GROUP_FILE.write_text(content, encoding="utf-8")
+
+
 _RUNTIME_WHITELIST = set(QQ_USER_WHITELIST) | _load_whitelist_file()
+_RUNTIME_MONITOR_GROUPS = set(QQ_MONITOR_GROUP_IDS) | _load_monitor_group_file()
 
 
 def _verify_signature(body: bytes, x_signature: Optional[str]) -> None:
@@ -154,6 +208,84 @@ def _is_whitelisted_user(event: Dict[str, Any]) -> bool:
     return bool(user_id and user_id in _RUNTIME_WHITELIST)
 
 
+def _is_monitored_group(event: Dict[str, Any]) -> bool:
+    """判断是否为已配置监听的群。"""
+    if event.get("message_type") != "group":
+        return False
+    if not _RUNTIME_MONITOR_GROUPS:
+        return False
+    group_id = str(event.get("group_id", ""))
+    return bool(group_id and group_id in _RUNTIME_MONITOR_GROUPS)
+
+
+def _sender_name(event: Dict[str, Any]) -> str:
+    """获取发送者展示名。"""
+    sender = event.get("sender", {})
+    if not isinstance(sender, dict):
+        return ""
+    for key in ("card", "nickname"):
+        value = str(sender.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _format_recall_notice(group_id: str, summary: Dict[str, str]) -> str:
+    """格式化撤回通知文本。"""
+    sender_name = summary.get("sender_name", "").strip()
+    user_id = summary.get("user_id", "").strip() or "未知账号"
+    who = f"{sender_name}({user_id})" if sender_name else user_id
+    text = summary.get("text", "").strip() or "[空消息]"
+    recalled_at = summary.get("recalled_at", "").strip() or "未知时间"
+    return f"【撤回留痕】群 {group_id}\n发送者: {who}\n撤回时间: {recalled_at}\n内容: {text}"
+
+
+async def _notify_super_admins(group_id: str, summary: Dict[str, str]) -> None:
+    """将撤回留痕通知超级管理员。"""
+    if not QQ_RECALL_NOTIFY_SUPERADMINS:
+        return
+    if not QQ_SUPER_ADMINS:
+        return
+
+    notice = sanitize_for_config(
+        _format_recall_notice(group_id=group_id, summary=summary),
+        _ANTI_RISK_CONFIG,
+        keep_newlines=True,
+        skip_length_limit=True,
+    )
+    forward_nodes = _build_forward_nodes(group_id=group_id, summary=summary)
+    for admin_id in QQ_SUPER_ADMINS:
+        if not admin_id.isdigit():
+            continue
+        try:
+            if QQ_RECALL_NOTIFY_MODE == "forward":
+                try:
+                    await _send_private_forward_msg(int(admin_id), forward_nodes)
+                except Exception:
+                    await _send_private_msg(int(admin_id), notice)
+            else:
+                await _send_private_msg(int(admin_id), notice)
+        except Exception as exc:
+            _AUDIT_LOGGER.log(
+                "message_failed",
+                {
+                    "pipeline": "recall_notify",
+                    "group_id": group_id,
+                    "admin_id": admin_id,
+                    "notify_mode": QQ_RECALL_NOTIFY_MODE,
+                    "error": str(exc),
+                },
+            )
+
+
+def _run_recall_cleanup_if_due() -> None:
+    """按配置周期执行撤回留痕清理。"""
+    result = _RECALL_STORE.cleanup_if_due()
+    if not result:
+        return
+    _AUDIT_LOGGER.log("recall_cleanup", result)
+
+
 def _parse_admin_command(text: str) -> tuple[str, str]:
     """解析白名单管理命令，返回 (action, arg)。"""
     raw = text.strip()
@@ -170,6 +302,27 @@ def _parse_admin_command(text: str) -> tuple[str, str]:
         if raw.startswith(prefix):
             return "del", raw[len(prefix) :].strip()
     if raw in ("白名单列表", "查看白名单"):
+        return "list", ""
+
+    return "", ""
+
+
+def _parse_monitor_group_command(text: str) -> tuple[str, str]:
+    """解析监听群管理命令，返回 (action, arg)。"""
+    raw = text.strip()
+    m = re.match(r"^/?mg\s+(add|del|list)\s*(.*)$", raw, flags=re.IGNORECASE)
+    if m:
+        action = m.group(1).lower()
+        arg = m.group(2).strip()
+        return action, arg
+
+    for prefix in ("添加监听群", "监听群添加"):
+        if raw.startswith(prefix):
+            return "add", raw[len(prefix) :].strip()
+    for prefix in ("删除监听群", "移除监听群", "监听群删除"):
+        if raw.startswith(prefix):
+            return "del", raw[len(prefix) :].strip()
+    if raw in ("监听群列表", "查看监听群"):
         return "list", ""
 
     return "", ""
@@ -194,6 +347,8 @@ def _is_help_query_text(text: str) -> bool:
     """判断是否为指令查询类请求（可放宽字数限制）。"""
     root_cmd, args = _parse_root_command(text)
     if root_cmd == "help" and not args:
+        return True
+    if root_cmd == "recall":
         return True
     return bool(args and args[0].lower() in _COMMAND_HELP_FLAGS)
 
@@ -230,39 +385,128 @@ def _handle_command(event: Dict[str, Any], text: str) -> Optional[str]:
     if args and args[0].lower() in _COMMAND_HELP_FLAGS:
         return _command_help_text(root_cmd)
 
+    if root_cmd == "recall":
+        return _handle_recall_command(event, args)
+
     return _handle_admin_command(event, text)
+
+
+def _handle_recall_command(event: Dict[str, Any], args: list[str]) -> str:
+    """处理撤回留痕命令。"""
+    if event.get("message_type") != "group":
+        return "recall 命令仅支持在群聊中使用。"
+    if not _is_super_admin(event):
+        return "无权限：仅超级管理员可查看撤回留痕。"
+    if not _is_monitored_group(event):
+        return "当前群未开启监听留痕。"
+
+    sub = args[0].lower() if args else "list"
+    if sub == "cleanup":
+        result = _RECALL_STORE.cleanup_expired()
+        return (
+            f"清理完成：删除 {result['removed_count']} 条，"
+            f"移除空群 {result['removed_groups']} 个，剩余 {result['remaining_count']} 条。"
+        )
+    if sub not in {"list", "ls"}:
+        return "用法：recall list [N] | recall cleanup"
+
+    limit = 10
+    if len(args) >= 2 and args[1].isdigit():
+        limit = min(20, max(1, int(args[1])))
+
+    group_id = str(event.get("group_id", ""))
+    records = _RECALL_STORE.list_recalled(group_id=group_id, limit=limit)
+    if not records:
+        return "暂无撤回记录。"
+
+    lines = [f"最近 {len(records)} 条撤回记录："]
+    for idx, item in enumerate(records, start=1):
+        sender_name = item.get("sender_name", "").strip()
+        user_id = item.get("user_id", "").strip() or "未知账号"
+        who = f"{sender_name}({user_id})" if sender_name else user_id
+        text = item.get("text", "").strip() or "[空消息]"
+        recalled_at = item.get("recalled_at", "").strip() or "未知时间"
+        lines.append(f"{idx}. {who} 撤回于 {recalled_at}：{text}")
+    return "\n".join(lines)
+
+
+async def _handle_notice_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """处理 OneBot notice 事件（撤回留痕）。"""
+    notice_type = str(event.get("notice_type", ""))
+    if notice_type != "group_recall":
+        _AUDIT_LOGGER.log("event_ignored", {"reason": "non-group-recall", "notice_type": notice_type})
+        return {"ok": True, "ignored": "non-group-recall"}
+
+    group_id = str(event.get("group_id", ""))
+    if not group_id or group_id not in _RUNTIME_MONITOR_GROUPS:
+        _AUDIT_LOGGER.log("event_ignored", {"reason": "group-not-monitored", "group_id": group_id})
+        return {"ok": True, "ignored": "group-not-monitored"}
+
+    message_id = str(event.get("message_id", ""))
+    operator_id = str(event.get("operator_id", ""))
+    summary = _RECALL_STORE.mark_recalled(group_id=group_id, message_id=message_id, operator_id=operator_id)
+    _AUDIT_LOGGER.log("group_message_recalled", {"group_id": group_id, **summary})
+    await _notify_super_admins(group_id=group_id, summary=summary)
+    return {"ok": True, "notice": "group-recall-recorded", "group_id": group_id}
 
 
 def _handle_admin_command(event: Dict[str, Any], text: str) -> Optional[str]:
     """处理超级管理员的白名单命令；非命令返回 None。"""
-    action, arg = _parse_admin_command(text)
-    if not action:
+    wl_action, wl_arg = _parse_admin_command(text)
+    mg_action, mg_arg = _parse_monitor_group_command(text)
+    if not wl_action and not mg_action:
         return None
     if not _is_super_admin(event):
-        return "无权限：仅超级管理员可管理白名单。"
+        return "无权限：仅超级管理员可管理白名单和监听群。"
 
-    if action == "list":
+    if wl_action == "list":
         if not _RUNTIME_WHITELIST:
             return "白名单为空。"
         return f"白名单账号：{'、'.join(sorted(_RUNTIME_WHITELIST))}"
 
-    uid = "".join(ch for ch in arg if ch.isdigit())
-    if not uid:
-        return "参数错误：请提供有效QQ号。"
+    if wl_action:
+        uid = "".join(ch for ch in wl_arg if ch.isdigit())
+        if not uid:
+            return "参数错误：请提供有效QQ号。"
 
-    if action == "add":
-        if uid in _RUNTIME_WHITELIST:
-            return f"账号 {uid} 已在白名单中。"
-        _RUNTIME_WHITELIST.add(uid)
-        _save_whitelist_file(_RUNTIME_WHITELIST)
-        return f"已添加白名单账号：{uid}"
+        if wl_action == "add":
+            if uid in _RUNTIME_WHITELIST:
+                return f"账号 {uid} 已在白名单中。"
+            _RUNTIME_WHITELIST.add(uid)
+            _save_whitelist_file(_RUNTIME_WHITELIST)
+            return f"已添加白名单账号：{uid}"
 
-    if action == "del":
-        if uid not in _RUNTIME_WHITELIST:
-            return f"账号 {uid} 不在白名单中。"
-        _RUNTIME_WHITELIST.remove(uid)
-        _save_whitelist_file(_RUNTIME_WHITELIST)
-        return f"已移除白名单账号：{uid}"
+        if wl_action == "del":
+            if uid not in _RUNTIME_WHITELIST:
+                return f"账号 {uid} 不在白名单中。"
+            _RUNTIME_WHITELIST.remove(uid)
+            _save_whitelist_file(_RUNTIME_WHITELIST)
+            return f"已移除白名单账号：{uid}"
+
+        return "未知命令。"
+
+    if mg_action == "list":
+        if not _RUNTIME_MONITOR_GROUPS:
+            return "监听群为空。"
+        return f"监听群：{'、'.join(sorted(_RUNTIME_MONITOR_GROUPS))}"
+
+    gid = "".join(ch for ch in mg_arg if ch.isdigit())
+    if not gid:
+        return "参数错误：请提供有效群号。"
+
+    if mg_action == "add":
+        if gid in _RUNTIME_MONITOR_GROUPS:
+            return f"群 {gid} 已在监听列表中。"
+        _RUNTIME_MONITOR_GROUPS.add(gid)
+        _save_monitor_group_file(_RUNTIME_MONITOR_GROUPS)
+        return f"已添加监听群：{gid}"
+
+    if mg_action == "del":
+        if gid not in _RUNTIME_MONITOR_GROUPS:
+            return f"群 {gid} 不在监听列表中。"
+        _RUNTIME_MONITOR_GROUPS.remove(gid)
+        _save_monitor_group_file(_RUNTIME_MONITOR_GROUPS)
+        return f"已移除监听群：{gid}"
 
     return "未知命令。"
 
@@ -289,6 +533,56 @@ async def _send_private_msg(user_id: int, text: str) -> None:
         resp.raise_for_status()
 
 
+def _build_forward_nodes(group_id: str, summary: Dict[str, str]) -> list[Dict[str, Any]]:
+    """构造合并转发节点。"""
+    sender_name = summary.get("sender_name", "").strip()
+    user_id = summary.get("user_id", "").strip() or "未知账号"
+    sender_uin = user_id if user_id.isdigit() else "10000"
+    who = f"{sender_name}({user_id})" if sender_name else user_id
+    text = summary.get("text", "").strip() or "[空消息]"
+    recalled_at = summary.get("recalled_at", "").strip() or "未知时间"
+    nodes = [
+        {
+            "type": "node",
+            "data": {
+                "nickname": "qq-agent",
+                "user_id": "10000",
+                "content": [{"type": "text", "data": {"text": f"群 {group_id} 撤回留痕通知"}}],
+            },
+        },
+        {
+            "type": "node",
+            "data": {
+                "nickname": sender_name or "群成员",
+                "user_id": sender_uin,
+                "content": [
+                    {
+                        "type": "text",
+                        "data": {"text": f"发送者: {who}\n撤回时间: {recalled_at}\n内容: {text}"},
+                    }
+                ],
+            },
+        },
+    ]
+    return nodes
+
+
+async def _send_private_forward_msg(user_id: int, nodes: list[Dict[str, Any]]) -> None:
+    """调用 OneBot 私聊合并转发接口。"""
+    url = f"{ONEBOT_API_BASE.rstrip('/')}/send_private_forward_msg"
+    headers: Dict[str, str] = {}
+    if ONEBOT_ACCESS_TOKEN:
+        headers["Authorization"] = f"Bearer {ONEBOT_ACCESS_TOKEN}"
+    payload = {
+        "user_id": str(user_id),
+        "message": nodes,
+        "messages": nodes,
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+
+
 @app.get("/healthz")
 async def healthz() -> Dict[str, str]:
     """健康检查接口。"""
@@ -303,14 +597,18 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
     body = await request.body()
     _verify_signature(body, x_signature)
     event = await request.json()
+    _run_recall_cleanup_if_due()
+    post_type = str(event.get("post_type", ""))
     msg_type = str(event.get("message_type", ""))
     user_id = str(event.get("user_id", ""))
     group_id = str(event.get("group_id", ""))
 
-    if event.get("post_type") != "message":
+    if post_type == "notice":
+        return await _handle_notice_event(event)
+    if post_type != "message":
         _AUDIT_LOGGER.log(
             "event_ignored",
-            {"reason": "non-message", "post_type": str(event.get("post_type", ""))},
+            {"reason": "non-message", "post_type": post_type},
         )
         return {"ok": True, "ignored": "non-message"}
     if _is_self_message(event):
@@ -331,6 +629,14 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
             "text": text,
         },
     )
+    if _is_monitored_group(event):
+        _RECALL_STORE.append_message(
+            group_id=str(event.get("group_id", "")),
+            message_id=str(event.get("message_id", "")),
+            user_id=user_id,
+            text=text,
+            sender_name=_sender_name(event),
+        )
 
     command_reply = _handle_command(event, text)
     if command_reply is not None:

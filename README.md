@@ -36,6 +36,8 @@ ONEBOT_API_BASE=http://127.0.0.1:3000
 ONEBOT_ACCESS_TOKEN=your-onebot-token
 ONEBOT_EVENT_SECRET=your-onebot-secret
 QQ_BOT_SELF_ID=123456789
+QQ_MONITOR_GROUP_IDS=123456789,987654321
+QQ_MONITOR_GROUP_FILE=data/monitor_groups.txt
 QQ_USER_WHITELIST=123456789,987654321
 QQ_SUPER_ADMINS=123456789
 QQ_WHITELIST_FILE=data/whitelist_users.txt
@@ -49,6 +51,15 @@ BOT_CMD_DELAY_MAX=1.5
 # Layered memory
 QQ_MEMORY_FILE=data/memory/sessions.json
 QQ_MEMORY_MAX_TURNS=8
+
+# Recall monitor
+QQ_RECALL_STORE_FILE=data/memory/group_recall_store.json
+QQ_RECALL_STORE_MAX_PER_GROUP=500
+QQ_RECALL_NOTIFY_SUPERADMINS=1
+QQ_RECALL_NOTIFY_MODE=forward
+QQ_RECALL_RAW_TTL_HOURS=24
+QQ_RECALL_KEEP_DAYS=30
+QQ_RECALL_CLEANUP_INTERVAL_SECONDS=3600
 
 # Audit log
 QQ_AUDIT_LOG_ENABLED=1
@@ -69,12 +80,30 @@ QQ_AUDIT_LOG_FILE=data/logs/audit.jsonl
 - `wl add 123456789`（添加白名单）
 - `wl del 123456789`（移除白名单）
 - `wl list`（查看白名单）
+- `mg add 123456789`（添加监听群）
+- `mg del 123456789`（移除监听群）
+- `mg list`（查看监听群）
+- `recall list`（查看当前群最近撤回记录）
+- `recall list 20`（查看当前群最近 20 条撤回记录）
+- `recall cleanup`（立即清理过期留痕记录）
 
 中文别名：
 
 - `添加白名单123456789`
 - `删除白名单123456789`
 - `白名单列表`
+
+说明：
+- 仅 `QQ_MONITOR_GROUP_IDS` 配置的群会被监听并记录；
+- 监听群会写入 `QQ_MONITOR_GROUP_FILE`，重启后保留；
+- 撤回记录查询仅超级管理员可用；
+- 撤回发生后可自动私发超级管理员（`QQ_RECALL_NOTIFY_SUPERADMINS=1`）；
+- 超管通知模式：`QQ_RECALL_NOTIFY_MODE=forward|text`（默认 `forward`，失败自动降级文本）；
+- 记录文件默认保存到 `QQ_RECALL_STORE_FILE`。
+- 存储控制：
+  - 普通消息缓存默认仅保留 24 小时（`QQ_RECALL_RAW_TTL_HOURS`）；
+  - 撤回留痕默认保留 30 天（`QQ_RECALL_KEEP_DAYS`）；
+  - 定时清理默认每 1 小时执行一次（`QQ_RECALL_CLEANUP_INTERVAL_SECONDS`）。
 
 ## 分层记忆与审计日志
 
