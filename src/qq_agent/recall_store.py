@@ -7,7 +7,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import time
 
 
@@ -134,6 +134,7 @@ class GroupRecallStore:
         user_id: str,
         text: str,
         sender_name: str,
+        message_segments: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """追加一条群消息。"""
         data = self._load_all()
@@ -147,6 +148,7 @@ class GroupRecallStore:
                 "user_id": user_id,
                 "sender_name": sender_name,
                 "text": text,
+                "message_segments": message_segments or [],
                 "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "recalled": False,
                 "recalled_at": "",
@@ -156,7 +158,7 @@ class GroupRecallStore:
         group_bucket["messages"] = messages[-self._config.max_messages_per_group :]
         self._save_all(data)
 
-    def mark_recalled(self, group_id: str, message_id: str, operator_id: str) -> Dict[str, str]:
+    def mark_recalled(self, group_id: str, message_id: str, operator_id: str) -> Dict[str, Any]:
         """将消息标记为已撤回，返回留痕摘要。"""
         data = self._load_all()
         groups = data.setdefault("groups", {})
@@ -176,6 +178,7 @@ class GroupRecallStore:
                 "user_id": "",
                 "sender_name": "",
                 "text": "[未捕获到原始消息文本]",
+                "message_segments": [],
                 "ts": "",
                 "recalled": True,
                 "recalled_at": now_ts,
@@ -195,12 +198,13 @@ class GroupRecallStore:
             "user_id": str(hit.get("user_id", "")),
             "sender_name": str(hit.get("sender_name", "")),
             "text": str(hit.get("text", "")),
+            "message_segments": hit.get("message_segments", []),
             "ts": str(hit.get("ts", "")),
             "recalled_at": str(hit.get("recalled_at", "")),
             "operator_id": str(hit.get("operator_id", "")),
         }
 
-    def list_recalled(self, group_id: str, limit: int = 10) -> List[Dict[str, str]]:
+    def list_recalled(self, group_id: str, limit: int = 10) -> List[Dict[str, Any]]:
         """按时间倒序获取群内撤回记录。"""
         data = self._load_all()
         groups = data.get("groups", {})
@@ -212,6 +216,7 @@ class GroupRecallStore:
                 "user_id": str(item.get("user_id", "")),
                 "sender_name": str(item.get("sender_name", "")),
                 "text": str(item.get("text", "")),
+                "message_segments": item.get("message_segments", []),
                 "ts": str(item.get("ts", "")),
                 "recalled_at": str(item.get("recalled_at", "")),
                 "operator_id": str(item.get("operator_id", "")),

@@ -105,6 +105,8 @@ QQ_AUDIT_LOG_FILE=data/logs/audit.jsonl
 - 撤回记录查询仅超级管理员可用；
 - 撤回发生后可自动私发超级管理员（`QQ_RECALL_NOTIFY_SUPERADMINS=1`）；
 - 超管通知模式：`QQ_RECALL_NOTIFY_MODE=forward|text`（默认 `forward`，失败自动降级文本）；
+- 撤回通知优先使用原始 `message` 段做合并转发（可保留 `at/image` 等消息元素）；
+- 图片等媒体是否可回显受 QQ 资源可用性影响，资源过期时可能仍无法完整展示；
 - 记录文件默认保存到 `QQ_RECALL_STORE_FILE`。
 - 存储控制：
   - 普通消息缓存默认仅保留 24 小时（`QQ_RECALL_RAW_TTL_HOURS`）；

@@ -33,10 +33,12 @@ class RecallStoreTests(unittest.TestCase):
                 user_id="u1",
                 text="hello",
                 sender_name="张三",
+                message_segments=[{"type": "text", "data": {"text": "hello"}}],
             )
             summary = store.mark_recalled(group_id="10001", message_id="m1", operator_id="u2")
             self.assertEqual(summary["message_id"], "m1")
             self.assertEqual(summary["text"], "hello")
+            self.assertEqual(summary["message_segments"], [{"type": "text", "data": {"text": "hello"}}])
             records = store.list_recalled(group_id="10001", limit=10)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["operator_id"], "u2")

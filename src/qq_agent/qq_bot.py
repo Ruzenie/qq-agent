@@ -13,7 +13,7 @@ import hmac
 import os
 from pathlib import Path
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -187,6 +187,23 @@ def _extract_text(event: Dict[str, Any]) -> str:
     return ""
 
 
+def _extract_message_segments(event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """提取 OneBot 原始 message 段数组。"""
+    message = event.get("message")
+    if not isinstance(message, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for seg in message:
+        if not isinstance(seg, dict):
+            continue
+        seg_type = seg.get("type")
+        data = seg.get("data", {})
+        if not isinstance(seg_type, str) or not isinstance(data, dict):
+            continue
+        normalized.append({"type": seg_type, "data": data})
+    return normalized
+
+
 def _is_self_message(event: Dict[str, Any]) -> bool:
     """判断是否为机器人自身发出的消息，避免自回环。"""
     user_id = str(event.get("user_id", ""))
@@ -239,17 +256,17 @@ def _sender_name(event: Dict[str, Any]) -> str:
     return ""
 
 
-def _format_recall_notice(group_id: str, summary: Dict[str, str]) -> str:
+def _format_recall_notice(group_id: str, summary: Dict[str, Any]) -> str:
     """格式化撤回通知文本。"""
-    sender_name = summary.get("sender_name", "").strip()
-    user_id = summary.get("user_id", "").strip() or "未知账号"
+    sender_name = str(summary.get("sender_name", "")).strip()
+    user_id = str(summary.get("user_id", "")).strip() or "未知账号"
     who = f"{sender_name}({user_id})" if sender_name else user_id
-    text = summary.get("text", "").strip() or "[空消息]"
-    recalled_at = summary.get("recalled_at", "").strip() or "未知时间"
+    text = str(summary.get("text", "")).strip() or "[空消息]"
+    recalled_at = str(summary.get("recalled_at", "")).strip() or "未知时间"
     return f"【撤回留痕】群 {group_id}\n发送者: {who}\n撤回时间: {recalled_at}\n内容: {text}"
 
 
-async def _notify_super_admins(group_id: str, summary: Dict[str, str]) -> None:
+async def _notify_super_admins(group_id: str, summary: Dict[str, Any]) -> None:
     """将撤回留痕通知超级管理员。"""
     if not QQ_RECALL_NOTIFY_SUPERADMINS:
         return
@@ -564,14 +581,19 @@ async def _send_private_msg(user_id: int, text: str) -> None:
         resp.raise_for_status()
 
 
-def _build_forward_nodes(group_id: str, summary: Dict[str, str]) -> list[Dict[str, Any]]:
+def _build_forward_nodes(group_id: str, summary: Dict[str, Any]) -> list[Dict[str, Any]]:
     """构造合并转发节点。"""
-    sender_name = summary.get("sender_name", "").strip()
-    user_id = summary.get("user_id", "").strip() or "未知账号"
+    sender_name = str(summary.get("sender_name", "")).strip()
+    user_id = str(summary.get("user_id", "")).strip() or "未知账号"
     sender_uin = user_id if user_id.isdigit() else "10000"
     who = f"{sender_name}({user_id})" if sender_name else user_id
-    text = summary.get("text", "").strip() or "[空消息]"
-    recalled_at = summary.get("recalled_at", "").strip() or "未知时间"
+    text = str(summary.get("text", "")).strip() or "[空消息]"
+    recalled_at = str(summary.get("recalled_at", "")).strip() or "未知时间"
+    raw_segments = summary.get("message_segments", [])
+    if isinstance(raw_segments, list) and raw_segments:
+        content_segments = raw_segments
+    else:
+        content_segments = [{"type": "text", "data": {"text": text}}]
     nodes = [
         {
             "type": "node",
@@ -586,12 +608,15 @@ def _build_forward_nodes(group_id: str, summary: Dict[str, str]) -> list[Dict[st
             "data": {
                 "nickname": sender_name or "群成员",
                 "user_id": sender_uin,
-                "content": [
-                    {
-                        "type": "text",
-                        "data": {"text": f"发送者: {who}\n撤回时间: {recalled_at}\n内容: {text}"},
-                    }
-                ],
+                "content": content_segments,
+            },
+        },
+        {
+            "type": "node",
+            "data": {
+                "nickname": "qq-agent",
+                "user_id": "10000",
+                "content": [{"type": "text", "data": {"text": f"发送者: {who}\n撤回时间: {recalled_at}"}}],
             },
         },
     ]
@@ -667,6 +692,7 @@ async def onebot_event(request: Request, x_signature: Optional[str] = Header(def
             user_id=user_id,
             text=text,
             sender_name=_sender_name(event),
+            message_segments=_extract_message_segments(event),
         )
 
     command_reply = _handle_command(event, text)

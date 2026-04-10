@@ -20,9 +20,27 @@ class RecallNotifyTests(unittest.IsolatedAsyncioTestCase):
                 "recalled_at": "2026-04-10 18:00:00",
             },
         )
-        self.assertEqual(len(nodes), 2)
+        self.assertEqual(len(nodes), 3)
         self.assertEqual(nodes[0]["type"], "node")
         self.assertEqual(nodes[1]["type"], "node")
+
+    def test_build_forward_nodes_keep_message_segments(self) -> None:
+        segments = [
+            {"type": "at", "data": {"qq": "123456"}},
+            {"type": "text", "data": {"text": "在干嘛"}},
+            {"type": "image", "data": {"url": "https://example.com/a.jpg"}},
+        ]
+        nodes = bot._build_forward_nodes(
+            group_id="10001",
+            summary={
+                "sender_name": "张三",
+                "user_id": "20001",
+                "text": "fallback",
+                "message_segments": segments,
+                "recalled_at": "2026-04-10 18:00:00",
+            },
+        )
+        self.assertEqual(nodes[1]["data"]["content"], segments)
 
     async def test_notify_forward_fallback_to_private(self) -> None:
         old_notify = bot.QQ_RECALL_NOTIFY_SUPERADMINS
