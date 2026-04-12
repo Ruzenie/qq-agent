@@ -22,6 +22,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from .anti_risk import load_anti_risk_config_from_env, random_command_delay, sanitize_for_config
 from .agent_runtime import AgentRuntime
 from .audit_logger import AuditLogger
+from .meme_generator import render_to_cq_code, templates_help_text
 from .recall_store import GroupRecallStore, load_recall_store_config_from_env
 
 load_dotenv()
@@ -67,6 +68,7 @@ _COMMAND_ALIASES = {
     "菜单": "help",
     "撤回": "recall",
     "防撤回": "recall",
+    "表情包": "meme",
 }
 _COMMAND_REGISTRY: Dict[str, Dict[str, Any]] = {
     "help": {
@@ -102,6 +104,14 @@ _COMMAND_REGISTRY: Dict[str, Dict[str, Any]] = {
         "subcommands": {
             "list [N]": "查看本群最近 N 条撤回记录（默认10，最大20）",
             "cleanup": "立即清理过期留痕记录",
+        },
+    },
+    "meme": {
+        "summary": "表情包生成",
+        "subcommands": {
+            "list": "查看可用模板",
+            "classic 上句|下句": "生成黑白经典双行模板",
+            "alert 标题|内容": "生成黄色警示牌模板",
         },
     },
 }
@@ -374,7 +384,7 @@ def _is_help_query_text(text: str) -> bool:
     root_cmd, args = _parse_root_command(text)
     if root_cmd == "help" and not args:
         return True
-    if root_cmd in {"recall", "chat"}:
+    if root_cmd in {"recall", "chat", "meme"}:
         return True
     return bool(args and args[0].lower() in _COMMAND_HELP_FLAGS)
 
@@ -416,6 +426,9 @@ def _handle_command(event: Dict[str, Any], text: str) -> Optional[str]:
 
     if root_cmd == "recall":
         return _handle_recall_command(event, args)
+
+    if root_cmd == "meme":
+        return _handle_meme_command(args)
 
     return _handle_admin_command(event, text)
 
@@ -476,6 +489,30 @@ def _handle_recall_command(event: Dict[str, Any], args: list[str]) -> str:
         recalled_at = item.get("recalled_at", "").strip() or "未知时间"
         lines.append(f"{idx}. {who} 撤回于 {recalled_at}：{text}")
     return "\n".join(lines)
+
+
+def _handle_meme_command(args: list[str]) -> str:
+    """处理 meme 命令。"""
+    if not args:
+        return (
+            "用法：meme list | meme classic 上句|下句 | meme alert 标题|内容\n"
+            "可先执行 meme list 查看模板。"
+        )
+
+    sub = args[0].strip().lower()
+    if sub in {"list", "ls", "help", "--help", "-h", "帮助"}:
+        return templates_help_text()
+
+    payload = " ".join(args[1:]).strip()
+    if not payload:
+        return f"参数不足：请提供文案。示例：meme {sub} 文案A|文案B"
+
+    try:
+        return render_to_cq_code(template_key=sub, payload=payload)
+    except ValueError as exc:
+        return f"生成失败：{exc}"
+    except Exception:
+        return "生成失败：渲染异常，请稍后重试。"
 
 
 async def _handle_notice_event(event: Dict[str, Any]) -> Dict[str, Any]:

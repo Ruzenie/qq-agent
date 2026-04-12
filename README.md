@@ -89,6 +89,9 @@ QQ_AUDIT_LOG_FILE=data/logs/audit.jsonl
 - `recall list`（查看当前群最近撤回记录）
 - `recall list 20`（查看当前群最近 20 条撤回记录）
 - `recall cleanup`（立即清理过期留痕记录）
+- `meme list`（查看可用表情包模板）
+- `meme classic 上句|下句`（生成黑白经典双行模板）
+- `meme alert 标题|内容`（生成黄色警示牌模板）
 
 中文别名：
 
@@ -108,6 +111,8 @@ QQ_AUDIT_LOG_FILE=data/logs/audit.jsonl
 - 撤回通知优先使用原始 `message` 段做合并转发（可保留 `at/image` 等消息元素）；
 - 图片等媒体是否可回显受 QQ 资源可用性影响，资源过期时可能仍无法完整展示；
 - 记录文件默认保存到 `QQ_RECALL_STORE_FILE`。
+- 表情包命令会返回 CQ 图片码，依赖 OneBot 实现对 `[CQ:image,file=file://...]` 的支持；
+- 文案参数使用 `|` 分隔两段文本，例如：`meme classic 我真的会谢|但我还能继续改`。
 - 存储控制：
   - 普通消息缓存默认仅保留 24 小时（`QQ_RECALL_RAW_TTL_HOURS`）；
   - 撤回留痕默认保留 30 天（`QQ_RECALL_KEEP_DAYS`）；
