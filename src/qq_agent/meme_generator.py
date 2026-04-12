@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
+import io
 from pathlib import Path
 import tempfile
 import uuid
@@ -66,12 +68,25 @@ def templates_help_text() -> str:
 
 def render_to_cq_code(template_key: str, payload: str) -> str:
     """按模板渲染图片并返回 CQ 图片码。"""
-    image_path = render_meme(template_key=template_key, payload=payload)
-    return f"[CQ:image,file=file://{image_path}]"
+    image = _render_image(template_key=template_key, payload=payload)
+    image_bytes = _encode_png_bytes(image)
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"[CQ:image,file=base64://{encoded}]"
 
 
 def render_meme(template_key: str, payload: str) -> Path:
     """渲染模板图片并返回本地文件路径。"""
+    image = _render_image(template_key=template_key, payload=payload)
+    output_dir = Path(tempfile.gettempdir()) / "qq-agent-memes"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    key = template_key.strip().lower()
+    output_path = output_dir / f"{key}_{uuid.uuid4().hex[:12]}.png"
+    image.save(output_path, format="PNG")
+    return output_path
+
+
+def _render_image(template_key: str, payload: str) -> Image.Image:
+    """根据模板渲染图片对象。"""
     key = template_key.strip().lower()
     if key not in _TEMPLATES:
         raise ValueError(f"不支持的模板：{template_key}")
@@ -84,12 +99,14 @@ def render_meme(template_key: str, payload: str) -> Path:
     else:
         raise ValueError(f"不支持的模板：{template_key}")
 
-    image = renderer(payload)
-    output_dir = Path(tempfile.gettempdir()) / "qq-agent-memes"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{key}_{uuid.uuid4().hex[:12]}.png"
-    image.save(output_path, format="PNG")
-    return output_path
+    return renderer(payload)
+
+
+def _encode_png_bytes(image: Image.Image) -> bytes:
+    """将图片编码为 PNG 字节流。"""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _render_classic(payload: str) -> Image.Image:

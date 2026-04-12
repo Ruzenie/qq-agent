@@ -18,13 +18,13 @@ class MemeCommandTests(unittest.TestCase):
 
     def test_handle_meme_generate(self) -> None:
         reply = bot._handle_meme_command(["classic", "今天不想写bug|但还是得修"])
-        self.assertTrue(reply.startswith("[CQ:image,file=file://"))
+        self.assertTrue(reply.startswith("[CQ:image,file=base64://"))
 
     def test_handle_command_route_to_meme(self) -> None:
         event = {"message_type": "group", "group_id": "10001", "user_id": "20001"}
         reply = bot._handle_command(event, "/meme alert 紧急通知|测试内容")
         self.assertIsNotNone(reply)
-        self.assertTrue((reply or "").startswith("[CQ:image,file=file://"))
+        self.assertTrue((reply or "").startswith("[CQ:image,file=base64://"))
         self.assertTrue(bot._is_help_query_text("meme alert 紧急通知|测试内容"))
 
     def test_handle_meme_errors(self) -> None:
